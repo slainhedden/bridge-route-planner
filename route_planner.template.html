@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>US Bridge Clearance Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+ integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; color: #142432; background: #eef3f5; font: 16px/1.4 system-ui, sans-serif; }
+  main { max-width: 1340px; margin: auto; padding: 12px; }
+  h1 { font-size: clamp(1.45rem, 4vw, 2rem); margin: 0 0 4px; }
+  h2 { font-size: 1.1rem; margin: 0 0 6px; }
+  p { margin: 0 0 8px; }
+  .warning { background: #fff3d7; border-left: 4px solid #a35a09; padding: 9px 12px; margin: 10px 0; font-size: .86rem; }
+  .layout { display: grid; gap: 10px; }
+  details, .results { background: white; border: 1px solid #c8d4db; border-radius: 10px; padding: 10px; }
+  summary { font-weight: 700; min-height: 32px; cursor: pointer; }
+  form { display: grid; gap: 8px; }
+  label { display: block; font-size: .87rem; font-weight: 650; }
+  input, button, select { max-width: 100%; min-height: 44px; border: 1px solid #7b919d; border-radius: 7px; padding: 7px 9px; font: inherit; }
+  input, select { width: 100%; background: white; color: inherit; }
+  button { background: #f0f5f7; color: #173247; cursor: pointer; }
+  button[aria-pressed="true"] { outline: 2px solid #146e9b; }
+  button.primary { background: #125878; color: white; font-weight: 700; border-color: #125878; }
+  button:disabled { opacity: .6; cursor: wait; }
+  .field { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 6px; }
+  .numbers { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .map-card { border-radius: 10px; overflow: hidden; border: 1px solid #c8d4db; background: white; }
+  #map { height: clamp(340px, 56dvh, 660px); background: #dce7ec; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 14px; padding: 8px; font-size: .79rem; }
+  .dot { display: inline-block; width: 10px; height: 10px; margin-right: 4px; border-radius: 50%; }
+  .severe { background: #ad173b; } .medium { background: #c25300; } .low { background: #b17c04; }
+  .conflict { background: #590060; }
+  .secondary { font-size: .83rem; color: #435967; }
+  #confidence { color: #7a3800; font-size: .86rem; }
+  #status { margin: 0; }
+  #conflicts { padding: 0; list-style: none; max-height: 285px; overflow-y: auto; margin: 6px 0 0; }
+  #conflicts button { display: block; width: 100%; text-align: left; margin: 4px 0; }
+  .route-results label { margin: 8px 0 4px; }
+  @media (min-width: 850px) {
+    .layout { grid-template-columns: 330px minmax(0, 1fr); align-items: start; }
+    .map-card { grid-column: 2; grid-row: 1 / 3; }
+  }
+</style>
+<main>
+  <h1>US Bridge Clearance Map</h1>
+  <p class="secondary">2025 National Bridge Inventory · <span id="point-count"></span> mapped low-clearance records</p>
+  <p class="warning"><strong>Preliminary screening only — not a truck router.</strong>
+    Routes are for cars and ignore truck restrictions. The 2025 highway bridge inventory misses rail-only overpasses and other obstacles.
+    A nearby bridge is not necessarily on or above your road. No conflicts does not mean the truck fits. Check current signs, lane clearance, and state DOT truck routing or permit guidance.</p>
+  <div class="layout">
+    <details id="controls" open>
+      <summary>Route controls</summary>
+      <form id="planner">
+        <div class="field">
+          <label>Start <input id="start" type="text" required placeholder="Address, town, or coordinates" autocomplete="off"></label>
+          <button id="pick-start" type="button" aria-pressed="false" aria-label="Pick start on map">Map pin</button>
+        </div>
+        <div class="field">
+          <label>Destination <input id="end" type="text" required placeholder="Address, town, or coordinates" autocomplete="off"></label>
+          <button id="pick-end" type="button" aria-pressed="false" aria-label="Pick destination on map">Map pin</button>
+        </div>
+        <div class="numbers">
+          <label>Truck height (ft) <input id="feet" type="number" min="1" max="25" step="1" value="13" required></label>
+          <label>Truck height (in) <input id="inches" type="number" min="0" max="11" step="1" value="6" required></label>
+          <label>Safety margin (in) <input id="margin" type="number" min="0" max="36" step="1" value="3" required></label>
+          <label>Route buffer (m) <input id="buffer" type="number" min="1" max="500" step="1" value="30" required></label>
+        </div>
+        <div class="buttons">
+          <button type="submit" class="primary" id="submit">Screen route</button>
+          <button id="example" type="button">Boston example</button>
+        </div>
+        <p id="pick-instruction" class="secondary" role="status"></p>
+      </form>
+    </details>
+    <div class="map-card" id="map-card">
+      <div id="map" aria-label="US bridge clearance and route map"></div>
+      <div class="legend" aria-label="Map legend">
+        <span><i class="dot severe"></i>Under 11 ft</span>
+        <span><i class="dot medium"></i>11–under 13 ft</span>
+        <span><i class="dot low"></i>13–under 14 ft 6 in</span>
+        <span><i class="dot conflict"></i>Potential conflict</span>
+      </div>
+    </div>
+    <section class="results" aria-labelledby="results-heading">
+      <h2 id="results-heading">Route screening</h2>
+      <p id="status" role="status">Enter two locations or try the Boston example.</p>
+      <div id="route-results" class="route-results" hidden>
+        <label for="alternative">Available car routes</label>
+        <select id="alternative"></select>
+        <h2 id="conflict-count" tabindex="-1"></h2>
+        <p id="route-info" class="secondary"></p>
+        <p id="confidence"></p>
+        <ul id="conflicts"></ul>
+      </div>
+    </section>
+  </div>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+ integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script type="application/json" id="bridge-data">__BRIDGE_DATA__</script>
+<script>
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const bridges = JSON.parse($('bridge-data').textContent);
+  $('point-count').textContent = bridges.length.toLocaleString('en-US');
+  if (!window.L) $('status').textContent = 'The map library failed to load. Check your connection and reload.';
+  else init();
+
+  function init() {
+    const inch = 0.0254, cutoff = 4.4196, cellSize = .02, mPerDegree = 111195;
+    const geocoder = 'https://nominatim.openstreetmap.org/search';
+    const router = 'https://router.project-osrm.org/route/v1/driving/';
+    const map = L.map('map', { preferCanvas: true }).setView([39.1, -96.8], 4);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>',
+      maxZoom: 19
+    }).addTo(map);
+    map.attributionControl.addAttribution('Routing: <a href="https://project-osrm.org/">OSRM</a>');
+    const catalog = L.layerGroup().addTo(map), hits = L.layerGroup().addTo(map);
+    const endpoints = L.layerGroup().addTo(map), routesLayer = L.layerGroup().addTo(map);
+    const cells = new Map(), picked = {}, addressCache = new Map();
+    let pendingPin = null, lastLookup = 0, routes = [], markers = new Map(), options = null;
+    const key = (x, y) => x + ':' + y;
+    const index = degree => Math.floor(degree / cellSize);
+
+    function height(meters) {
+      const tenths = Math.floor(meters / inch * 10 + 1e-8);
+      return Math.floor(tenths / 120) + ' ft ' + (tenths % 120 / 10) + ' in';
+    }
+
+    function popup(b, distance) {
+      const box = document.createElement('div');
+      const title = document.createElement('strong');
+      title.textContent = height(b[2]) + ' · ' + b[6] + ' ' + b[3];
+      box.append(title);
+      const lines = [
+        'Carried: ' + (b[4] || 'not reported'), 'Crossed: ' + (b[5] || 'not reported'),
+        'Measurement: ' + b[7].replaceAll('_', ' ').replaceAll(';', ', ')
+      ];
+      if (distance !== undefined) lines.push('Route proximity: ' + Math.round(distance) + ' m');
+      for (const line of lines) {
+        const text = document.createElement('div');
+        text.textContent = line;
+        box.append(text);
+      }
+      return box;
+    }
+
+    bridges.forEach((b, i) => {
+      const k = key(index(b[1]), index(b[0]));
+      if (!cells.has(k)) cells.set(k, []);
+      cells.get(k).push(i);
+      const color = b[2] < 132 * inch ? '#ad173b' : b[2] < 156 * inch ? '#c25300' : '#b17c04';
+      L.circleMarker(b.slice(0, 2), { radius: 4, color, fillColor: color, weight: 1, fillOpacity: .62 })
+        .bindPopup(() => popup(b)).addTo(catalog);
+    });
+    hits.bringToFront?.();
+
+    function setPick(id) {
+      pendingPin = pendingPin === id ? null : id;
+      for (const endpoint of ['start', 'end']) {
+        $('pick-' + endpoint).setAttribute('aria-pressed', String(endpoint === pendingPin));
+      }
+      $('pick-instruction').textContent = pendingPin
+        ? 'Tap the map to set the ' + (pendingPin === 'start' ? 'start' : 'destination') + '.'
+        : '';
+      if (pendingPin && matchMedia('(max-width: 849px)').matches) {
+        $('map-card').scrollIntoView({ block: 'start', behavior: 'smooth' });
+      }
+    }
+    for (const id of ['start', 'end']) {
+      $('pick-' + id).addEventListener('click', () => setPick(id));
+      $(id).addEventListener('input', () => { delete picked[id]; });
+    }
+    map.on('click', ({ latlng }) => {
+      if (!pendingPin) return;
+      $(pendingPin).value = latlng.lat.toFixed(5) + ', ' + latlng.lng.toFixed(5);
+      picked[pendingPin] = [latlng.lat, latlng.lng];
+      drawPins(picked.start, picked.end);
+      setPick(pendingPin);
+    });
+    function drawPins(start, end) {
+      endpoints.clearLayers();
+      if (start) L.marker(start).bindTooltip('Start').addTo(endpoints);
+      if (end) L.marker(end).bindTooltip('Destination').addTo(endpoints);
+    }
+
+    async function jsonRequest(url) {
+      const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      if (!response.ok) throw new Error('Service returned HTTP ' + response.status);
+      return response.json();
+    }
+
+    async function resolve(text) {
+      const pair = text.match(/^\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*$/);
+      if (pair) {
+        const lat = Number(pair[1]), lon = Number(pair[2]);
+        if (Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new Error('Coordinates are outside valid bounds.');
+        return { xy: [lat, lon], label: text };
+      }
+      const cacheKey = text.toLowerCase();
+      if (addressCache.has(cacheKey)) return addressCache.get(cacheKey);
+      await new Promise(done => setTimeout(done, Math.max(0, 1100 - (Date.now() - lastLookup))));
+      lastLookup = Date.now();
+      let result;
+      try {
+        const params = new URLSearchParams({ q: text, format: 'jsonv2', limit: '1', countrycodes: 'us,pr,vi' });
+        result = await jsonRequest(geocoder + '?' + params);
+      } catch {
+        throw new Error('Address search unavailable. Try coordinates or pick points on the map.');
+      }
+      if (!result.length) throw new Error('No US address found for “' + text + '”. Try a more specific address or map pin.');
+      const address = { xy: [Number(result[0].lat), Number(result[0].lon)], label: result[0].display_name };
+      addressCache.set(cacheKey, address);
+      return address;
+    }
+
+    function screen(path, settings) {
+      const found = new Map(), latPad = settings.buffer / mPerDegree;
+      for (let i = 1; i < path.length; i++) {
+        const [lon1, lat1] = path[i - 1], [lon2, lat2] = path[i];
+        if (Math.abs(lon2 - lon1) > 180) continue;
+        const scale = mPerDegree * Math.max(.005, Math.cos((lat1 + lat2) * Math.PI / 360));
+        const lonPad = settings.buffer / scale;
+        const dx = (lon2 - lon1) * scale, dy = (lat2 - lat1) * mPerDegree;
+        const extent = dx * dx + dy * dy;
+        for (let x = index(Math.min(lon1, lon2) - lonPad); x <= index(Math.max(lon1, lon2) + lonPad); x++) {
+          for (let y = index(Math.min(lat1, lat2) - latPad); y <= index(Math.max(lat1, lat2) + latPad); y++) {
+            for (const id of cells.get(key(x, y)) || []) {
+              const b = bridges[id];
+              if (b[2] >= settings.height - 1e-9) continue;
+              const px = (b[1] - lon1) * scale, py = (b[0] - lat1) * mPerDegree;
+              const t = extent ? Math.max(0, Math.min(1, (px * dx + py * dy) / extent)) : 0;
+              const distance = Math.hypot(px - t * dx, py - t * dy);
+              if (distance <= settings.buffer && (!found.has(id) || distance < found.get(id).distance)) {
+                found.set(id, { id, distance, order: i + t });
+              }
+            }
+          }
+        }
+      }
+      return [...found.values()].sort((a, b) => a.order - b.order);
+    }
+
+    function showRoute(selected) {
+      routesLayer.clearLayers();
+      hits.clearLayers();
+      markers = new Map();
+      const route = routes[selected];
+      routes.forEach((other, i) => {
+        if (i !== selected) L.geoJSON(other.geometry, { interactive: false, style: {
+          color: '#586a74', weight: 4, opacity: .55, dashArray: '6 6'
+        } }).addTo(routesLayer);
+      });
+      const line = L.geoJSON(route.geometry, { interactive: false, style: {
+        color: '#1268b1', weight: 5, opacity: .92
+      } }).addTo(routesLayer);
+      map.fitBounds(line.getBounds(), { padding: [24, 24], maxZoom: 16 });
+      const count = route.conflicts.length;
+      $('conflict-count').textContent = count + (count === 1 ? ' potential conflict' : ' potential conflicts');
+      $('route-info').textContent = (route.distance / 1609.344).toFixed(1) + ' mi · ' +
+        Math.round(route.duration / 60) + ' min (car) · ' + options.buffer + ' m buffer';
+      $('confidence').textContent = options.height > cutoff + 1e-9
+        ? 'Truck plus margin exceeds this map’s 14 ft 6 in coverage. Conflicts above the dataset cutoff are not screened.'
+        : (count ? 'Verify each flagged crossing and any unlisted obstacles with the road authority.'
+                 : 'No mapped records met these filters. This does not establish clearance.');
+      $('conflicts').replaceChildren();
+      for (const { id, distance } of route.conflicts) {
+        const b = bridges[id];
+        const marker = L.circleMarker(b.slice(0, 2), {
+          color: '#fff', weight: 2, radius: 8, fillColor: '#590060', fillOpacity: 1
+        }).bindPopup(() => popup(b, distance)).addTo(hits).bringToFront();
+        markers.set(id, marker);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = height(b[2]) + ' · ' + (b[5] || b[4] || b[3]) + ' · ' + Math.round(distance) + ' m away';
+        button.addEventListener('click', () => {
+          map.setView(b.slice(0, 2), Math.max(15, map.getZoom()));
+          markers.get(id).openPopup();
+          $('map-card').scrollIntoView({ block: 'nearest' });
+        });
+        const item = document.createElement('li');
+        item.append(button);
+        $('conflicts').append(item);
+      }
+    }
+
+    $('alternative').addEventListener('change', () => showRoute(Number($('alternative').value)));
+    $('example').addEventListener('click', () => {
+      if ($('submit').disabled) return;
+      $('start').value = '42.35680, -71.07188';
+      $('end').value = '42.35275, -71.10820';
+      $('feet').value = 13;
+      $('inches').value = 6;
+      $('margin').value = 3;
+      $('buffer').value = 30;
+      for (const id of Object.keys(picked)) delete picked[id];
+      $('planner').requestSubmit();
+    });
+    $('planner').addEventListener('submit', async event => {
+      event.preventDefault();
+      if ($('submit').disabled) return;
+      if (pendingPin) setPick(pendingPin);
+      $('submit').disabled = true;
+      $('example').disabled = true;
+      $('route-results').hidden = true;
+      routesLayer.clearLayers();
+      hits.clearLayers();
+      drawPins();
+      $('status').textContent = 'Finding a route and checking nearby records…';
+      options = {
+        height: (Number($('feet').value) * 12 + Number($('inches').value) + Number($('margin').value)) * inch,
+        buffer: Number($('buffer').value),
+      };
+      try {
+        const start = await resolve($('start').value.trim());
+        const end = await resolve($('end').value.trim());
+        const coords = [start.xy, end.xy].map(([lat, lon]) => lon + ',' + lat).join(';');
+        let response;
+        try {
+          response = await jsonRequest(router + coords + '?overview=full&geometries=geojson&alternatives=true');
+        } catch {
+          throw new Error('Routing service unavailable or no route found. Verify the endpoints or try again later.');
+        }
+        if (response.code !== 'Ok' || !response.routes?.length) throw new Error('No route found between these endpoints.');
+        routes = response.routes.map(route => ({ ...route, conflicts: screen(route.geometry.coordinates, options) }));
+        const fewest = routes.reduce((best, route, i) => route.conflicts.length < routes[best].conflicts.length ? i : best, 0);
+        const select = $('alternative');
+        select.replaceChildren();
+        routes.forEach((route, i) => {
+          const label = 'Route ' + (i + 1) + ' · ' + route.conflicts.length + ' flagged' +
+            (i === fewest && routes.length > 1 ? ' (fewest flagged)' : '');
+          select.add(new Option(label, i));
+        });
+        select.value = fewest;
+        drawPins(start.xy, end.xy);
+        showRoute(fewest);
+        $('status').textContent = start.label + ' → ' + end.label;
+        $('route-results').hidden = false;
+        if (matchMedia('(max-width: 849px)').matches) {
+          $('controls').open = false;
+          $('map-card').scrollIntoView({ block: 'start' });
+        }
+      } catch (error) {
+        $('status').textContent = error.message;
+      } finally {
+        $('submit').disabled = false;
+        $('example').disabled = false;
+      }
+    });
+  }
+</script>
+</html>
