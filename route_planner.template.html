@@ -49,6 +49,9 @@
   .record-list button { display: block; width: 100%; text-align: left; margin: 4px 0; }
   .record-list small { display: block; margin-top: 3px; color: #435967; }
   .record-checks { margin-top: 8px; }
+  #address-matches { min-width: 0; margin: 0; border: 1px solid #c8d4db; border-radius: 7px; }
+  #address-matches label { margin-bottom: 8px; }
+  #confirmed-location { overflow-wrap: anywhere; }
   .map-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 8px; }
   .map-tools input { width: auto; min-height: auto; }
   .map-tools label { display: flex; align-items: center; min-height: 44px; gap: 5px; }
@@ -84,6 +87,13 @@
           <button id="pick-end" type="button" aria-pressed="false" aria-label="Pick destination on map">Map pin</button>
         </div>
         <p id="input-error" role="alert" tabindex="-1" hidden></p>
+        <fieldset id="address-matches" hidden>
+          <legend>Confirm locations before screening</legend>
+          <label id="start-matches" hidden>Start match <select id="start-match"></select></label>
+          <label id="end-matches" hidden>Destination match <select id="end-match"></select></label>
+          <p class="secondary">Choose the full addresses below. If none are right, add a city and state or use a map pin.</p>
+          <p id="confirmed-location" class="secondary"></p>
+        </fieldset>
         <label>Truck height units <select id="height-unit">
           <option value="ft">Feet and inches</option><option value="m">Meters</option>
         </select></label>
@@ -92,6 +102,7 @@
           <label>Truck height (in) <input id="inches" type="number" min="0" max="11" step="1" value="6" required></label>
         </div>
         <label id="metric-height" hidden>Truck height (m) <input id="meters" type="number" min="0.3048" max="7.9" step="any" value="4.1148" required disabled></label>
+        <p class="secondary">Enter 13 ft and 6 in, or 13.5 ft and 0 in. For 4.1 m, select Meters.</p>
         <details class="advanced">
           <summary>Advanced</summary>
           <div class="numbers">
@@ -100,7 +111,6 @@
           </div>
           <p id="margin-help" class="secondary">Safety margin adds extra clearance to your truck height.</p>
           <p id="buffer-help" class="secondary">Route buffer checks records within this distance of the route line, even across nearby roads.</p>
-          <p class="secondary">For decimal feet, enter the full height in the feet box and enter 0 inches.</p>
           <div class="buttons">
             <button id="save-truck" type="button">Save truck settings</button>
             <button id="restore-truck" type="button" disabled>Restore settings</button>
@@ -122,6 +132,7 @@
       <div id="route-results" class="route-results" hidden>
         <h2 id="conflict-count" tabindex="-1"></h2>
         <p><strong class="rail-note">Rail overpasses not checked</strong></p>
+        <p id="border-warning" class="warning" hidden></p>
         <div id="advisories" hidden></div>
         <p id="route-info" class="secondary"></p>
         <p id="confidence"></p>
@@ -130,6 +141,7 @@
         <p id="selected-route-note" class="secondary"></p>
         <details id="resolved-details" hidden><summary>Check resolved locations</summary><p id="resolved-locations" class="secondary"></p></details>
         <p class="secondary"><a href="https://ops.fhwa.dot.gov/freight/policy/rpt_congress/truck_sw_laws/index.htm">FHWA guide to state truck size and weight laws</a>. Contact the state DOT for current restrictions and a truck-legal route.</p>
+        <p class="secondary">This page’s URL includes the screened locations and settings. Opening it runs a fresh route check.</p>
       </div>
     </section>
     <div class="map-card" id="map-card">
@@ -143,6 +155,7 @@
         <span><i class="dot medium"></i>11–under 13 ft</span>
         <span><i class="dot low"></i>13–under 14 ft 6 in</span>
         <span><i class="dot conflict"></i>Potential conflict</span>
+        <span id="border-legend" hidden><i class="dot" style="background:#a35a09"></i>Outside US inventory</span>
       </div>
     </div>
     <section class="results" id="route-details" aria-labelledby="route-details-heading" hidden>
@@ -164,6 +177,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script type="application/json" id="bridge-data">__BRIDGE_DATA__</script>
+<script type="application/json" id="route-boundaries">__ROUTE_BOUNDARIES__</script>
 <script>__ROUTE_MATCHING__</script>
 <script>
   'use strict';
@@ -174,7 +188,8 @@
   else init();
 
   function init() {
-    const { inch, foot, cutoff, duration, classify, routeAdvisories } = routeMatching;
+    const { inch, foot, cutoff, duration, classify, routeAdvisories, makeCoverageCheck } = routeMatching;
+    const checkCoverage = makeCoverageCheck(JSON.parse($('route-boundaries').textContent));
     const cellSize = .02, mPerDegree = 111195;
     const example = {
       start: { xy: [42.352594, -71.114518], label: 'Allston (Soldiers Field Road eastbound)' },
@@ -190,12 +205,14 @@
     map.attributionControl.addAttribution('Routing: <a href="https://project-osrm.org/">OSRM</a>');
     const catalog = L.layerGroup(), hits = L.layerGroup().addTo(map);
     const endpoints = L.layerGroup().addTo(map), routesLayer = L.layerGroup().addTo(map);
-    const cells = new Map(), picked = {}, addressCache = new Map();
+    const cells = new Map(), picked = {}, addressCache = new Map(), matches = {}, confirmed = {};
     let pendingPin = null, lastLookup = 0, routes = [], markers = new Map(), options = null;
     let revision = 0, screened = false, lastBounds = null, savedTruck = null;
+    let activeRequest = 0, restoring = false, restoredAlternative = null, hasShare = false;
     let selectedMarker = null;
     const recent = [];
     const truckFields = ['height-unit', 'feet', 'inches', 'meters', 'margin', 'buffer'];
+    const initialTruck = readTruck();
     const key = (x, y) => x + ':' + y;
     const index = degree => Math.floor(degree / cellSize);
 
@@ -269,6 +286,7 @@
       $('route-results').hidden = true;
       $('route-details').hidden = true;
       $('fit-route').hidden = true;
+      $('border-legend').hidden = true;
       routes = [];
       routesLayer.clearLayers();
       hits.clearLayers();
@@ -278,6 +296,7 @@
     function inputChanged() {
       ++revision;
       clearInputError();
+      if (!restoring) saveDraft();
       if (!screened && !$('submit').disabled) return;
       clearScreen();
       $('status').textContent = 'Inputs changed. Screen the route again.';
@@ -299,13 +318,22 @@
       $('pick-' + id).addEventListener('click', () => setPick(id));
       $(id).addEventListener('input', () => {
         delete picked[id];
+        clearMatches(id);
         inputChanged();
-        drawPins(picked.start, picked.end);
+        previewLocations();
+      });
+      $(id + '-match').addEventListener('change', () => {
+        const choice = $(id + '-match').value;
+        if (choice === '') delete confirmed[id];
+        else confirmed[id] = matches[id].candidates[Number(choice)];
+        inputChanged();
+        previewLocations(true);
       });
     }
     map.on('click', ({ latlng }) => {
       if (!pendingPin) return;
       $(pendingPin).value = latlng.lat.toFixed(5) + ', ' + latlng.lng.toFixed(5);
+      clearMatches(pendingPin);
       picked[pendingPin] = [latlng.lat, latlng.lng];
       inputChanged();
       drawPins(picked.start, picked.end);
@@ -317,6 +345,23 @@
       if (end) L.marker(end).bindTooltip('Destination').addTo(endpoints);
     }
 
+    function clearMatches(id) {
+      delete matches[id];
+      delete confirmed[id];
+      $(id + '-matches').hidden = true;
+      $(id + '-match').replaceChildren();
+      $('address-matches').hidden = !Object.keys(matches).length;
+    }
+
+    function previewLocations(fit = false) {
+      const start = confirmed.start?.xy || picked.start, end = confirmed.end?.xy || picked.end;
+      drawPins(start, end);
+      $('confirmed-location').textContent = ['start', 'end']
+        .filter(id => confirmed[id]?.fullLabel).map(id => (id === 'start' ? 'Start: ' : 'Destination: ') +
+          confirmed[id].fullLabel).join(' · ');
+      if (fit && (start || end)) map.fitBounds(L.latLngBounds([start, end].filter(Boolean)), { padding: [24, 24], maxZoom: 14 });
+    }
+
     function clearInputError() {
       $('input-error').hidden = true;
       $('input-error').textContent = '';
@@ -325,19 +370,25 @@
     }
 
     async function jsonRequest(url) {
+      if (navigator.onLine === false) throw new Error(offlineMessage);
       const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
-      if (!response.ok) throw new Error('Service returned HTTP ' + response.status);
-      return response.json();
+      const body = await response.json();
+      if (!response.ok && !(response.status === 400 && ['NoRoute', 'NoSegment'].includes(body.code))) {
+        throw new Error('Service returned HTTP ' + response.status);
+      }
+      return body;
     }
+
+    const offlineMessage = 'You’re offline. Reconnect to the internet to look up addresses and screen routes.';
 
     async function resolve(text) {
       const preset = Object.values(example).find(place => place.label === text);
-      if (preset) return preset;
+      if (preset) return [preset];
       const pair = text.match(/^\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*$/);
       if (pair) {
         const lat = Number(pair[1]), lon = Number(pair[2]);
         if (Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new Error('Coordinates are outside valid bounds.');
-        return { xy: [lat, lon], label: text };
+        return [{ xy: [lat, lon], label: text }];
       }
       const cacheKey = text.toLowerCase();
       if (addressCache.has(cacheKey)) return addressCache.get(cacheKey);
@@ -345,16 +396,35 @@
       lastLookup = Date.now();
       let result;
       try {
-        const params = new URLSearchParams({ q: text, format: 'jsonv2', limit: '1', countrycodes: 'us,pr,vi' });
+        const params = new URLSearchParams({ q: text, format: 'jsonv2', limit: '5', countrycodes: 'us,pr,vi' });
         result = await jsonRequest(geocoder + '?' + params);
       } catch {
-        throw new Error('Address search unavailable. Try coordinates or pick points on the map.');
+        throw new Error(navigator.onLine === false ? offlineMessage :
+          'Address search is unavailable. Try again, enter coordinates, or pick points on the map. Routing still needs internet.');
       }
       if (!result.length) throw new Error('No US address found for “' + text + '”. For an intersection, use Map pin or enter latitude, longitude.');
-      const address = { xy: [Number(result[0].lat), Number(result[0].lon)],
-        label: result[0].display_name.split(',').slice(0, 2).join(','), fullLabel: result[0].display_name };
-      addressCache.set(cacheKey, address);
-      return address;
+      const candidates = result.map(place => ({
+        xy: [Number(place.lat), Number(place.lon)],
+        label: place.display_name.split(',').slice(0, 2).join(','), fullLabel: place.display_name
+      }));
+      addressCache.set(cacheKey, candidates);
+      return candidates;
+    }
+
+    async function prepareEndpoint(id, request) {
+      if (confirmed[id]) return;
+      const candidates = await resolve(request[id]);
+      if (request.revision !== revision) return;
+      if (!candidates[0].fullLabel) {
+        confirmed[id] = candidates[0];
+        return;
+      }
+      if (matches[id]) return;
+      matches[id] = { candidates };
+      $(id + '-match').replaceChildren(new Option('Choose a match', ''),
+        ...candidates.map((place, i) => new Option(place.fullLabel, i)));
+      $(id + '-matches').hidden = false;
+      $('address-matches').hidden = false;
     }
 
     function screen(route, settings) {
@@ -400,7 +470,7 @@
       }
       for (const records of Object.values(results)) records.sort((a, b) => a.along - b.along);
       return {
-        ...route, results, ...routeAdvisories(steps),
+        ...route, results, ...routeAdvisories(steps), coverage: checkCoverage(route.geometry.coordinates),
         mainRoads: [...mainRoads].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([road]) => road).join(' / '),
       };
     }
@@ -473,6 +543,13 @@
       const line = L.geoJSON(route.geometry, { interactive: false, style: {
         color: '#1268b1', weight: 5, opacity: .92
       } }).addTo(routesLayer);
+      const outside = route.coverage.countries;
+      $('border-warning').hidden = $('border-legend').hidden = !outside.length;
+      $('border-warning').textContent = outside.length ? 'This route enters ' + outside.join(' and ') +
+        '. The US bridge inventory does not cover the orange portions. The results below are for US inventory records only.' : '';
+      if (outside.length) L.polyline(route.coverage.outside.map(segment => segment.map(([x, y]) => [y, x])), {
+        color: '#a35a09', weight: 5, dashArray: '7 5', interactive: false
+      }).addTo(routesLayer);
       lastBounds = line.getBounds();
       fitRoute();
       $('fit-route').hidden = false;
@@ -533,10 +610,81 @@
       inputChanged();
     }
 
+    function plannerState() {
+      return {
+        start: $('start').value, end: $('end').value, truck: readTruck(),
+        locations: { ...confirmed },
+      };
+    }
+
+    function saveDraft() {
+      const state = { plannerDraft: plannerState() };
+      if (hasShare) {
+        history.pushState(state, '', location.pathname + location.search);
+        hasShare = false;
+      } else {
+        history.replaceState(state, '');
+      }
+    }
+
+    function saveShare(selected) {
+      const state = { ...plannerState(), selected };
+      history.replaceState(null, '', '#route=' + encodeURIComponent(JSON.stringify(state)));
+      hasShare = true;
+    }
+
+    function restoreState(state) {
+      restoring = true;
+      try {
+        setEndpoints(state?.start || '', state?.end || '');
+        restoreTruck({ ...initialTruck, ...state?.truck });
+        for (const id of ['start', 'end']) {
+          const place = state?.locations?.[id];
+          if (typeof place?.label === 'string' && (place.fullLabel === undefined || typeof place.fullLabel === 'string') &&
+              Array.isArray(place.xy) && place.xy.length === 2 && place.xy.every(Number.isFinite) &&
+              Math.abs(place.xy[0]) <= 90 && Math.abs(place.xy[1]) <= 180) {
+            confirmed[id] = place;
+          }
+        }
+        previewLocations();
+      } finally {
+        restoring = false;
+      }
+    }
+
+    function restoreNavigation() {
+      let shared = null;
+      if (location.hash.startsWith('#route=')) {
+        try {
+          const state = JSON.parse(decodeURIComponent(location.hash.slice(7)));
+          if (typeof state?.start === 'string' && typeof state?.end === 'string') shared = state;
+        } catch {}
+      }
+      if (pendingPin) setPick(pendingPin);
+      ++activeRequest;
+      setBusy(false);
+      clearScreen();
+      screened = false;
+      hasShare = !!shared;
+      restoredAlternative = shared?.selected ?? null;
+      const draft = history.state?.plannerDraft;
+      restoreState(shared || draft);
+      $('controls').open = true;
+      $('status').textContent = draft ? 'Draft restored. Screen the route when ready.' : 'Enter two locations or try the Boston example.';
+      if (shared) $('planner').requestSubmit();
+    }
+
+    function setBusy(busy) {
+      $('submit').disabled = busy;
+      $('example').disabled = busy;
+    }
+
     function setEndpoints(start, end) {
       $('start').value = start;
       $('end').value = end;
       for (const id of Object.keys(picked)) delete picked[id];
+      clearMatches('start');
+      clearMatches('end');
       inputChanged();
       drawPins();
     }
@@ -556,12 +704,15 @@
     $('reverse').addEventListener('click', () => setEndpoints($('end').value, $('start').value));
     $('recent-routes').addEventListener('change', event => {
       if (!event.target.value) return;
-      const entry = recent[Number(event.target.value)];
-      setEndpoints(entry.start, entry.end);
-      restoreTruck(entry.truck);
+      restoreState(recent[Number(event.target.value)]);
+      saveDraft();
       event.target.value = '';
     });
-    $('alternative').addEventListener('change', () => showRoute(Number($('alternative').value)));
+    $('alternative').addEventListener('change', () => {
+      const selected = Number($('alternative').value);
+      showRoute(selected);
+      saveShare(selected);
+    });
     $('planner').addEventListener('invalid', event => {
       const advanced = event.target.closest('.advanced');
       if (advanced) advanced.open = true;
@@ -576,8 +727,9 @@
       event.preventDefault();
       if ($('submit').disabled) return;
       if (pendingPin) setPick(pendingPin);
-      $('submit').disabled = true;
-      $('example').disabled = true;
+      const attempt = ++activeRequest, preferredAlternative = restoredAlternative;
+      restoredAlternative = null;
+      setBusy(true);
       clearInputError();
       clearScreen();
       $('status').textContent = 'Finding a route and checking nearby records…';
@@ -593,27 +745,46 @@
       };
       let resolving = 'start';
       try {
-        const start = await resolve(request.start);
+        if (!request.start) throw new Error('Enter a start address or choose a map pin.');
+        if (!request.end) {
+          resolving = 'end';
+          throw new Error('Enter a destination address or choose a map pin.');
+        }
+        await prepareEndpoint('start', request);
         if (request.revision !== revision) return;
         resolving = 'end';
-        const end = await resolve(request.end);
+        await prepareEndpoint('end', request);
         if (request.revision !== revision) return;
+        if (!confirmed.start || !confirmed.end) {
+          $('status').textContent = 'Choose the matching addresses, then screen the route again.';
+          $(confirmed.start ? 'end-match' : 'start-match').focus();
+          return;
+        }
         resolving = null;
+        const { start, end } = confirmed;
+        previewLocations(true);
         const coords = [start.xy, end.xy].map(([lat, lon]) => lon + ',' + lat).join(';');
+        if (coords.split(';')[0] === coords.split(';')[1]) throw new Error('Start and destination are the same. Choose two different locations.');
         let response;
         try {
           response = await jsonRequest(router + coords + '?overview=full&geometries=geojson&alternatives=true&steps=true');
         } catch {
-          throw new Error('Routing service unavailable or no route found. Verify the endpoints or try again later.');
+          throw new Error(navigator.onLine === false ? offlineMessage :
+            'The routing service did not respond. Check your internet connection or try again.');
         }
         if (request.revision !== revision) return;
-        if (response.code !== 'Ok' || !response.routes?.length) throw new Error('No route found between these endpoints.');
+        if (response.code === 'NoSegment') throw new Error('A location could not be matched to a drivable road. Try moving its map pin.');
+        if (response.code !== 'Ok' || !response.routes?.length) {
+          throw new Error('No connected driving route between these locations. Separate islands, such as Oʻahu and Hawaiʻi, may not be connected by road.');
+        }
         routes = response.routes.map(route => screen(route, options));
         const fastest = Math.min(...routes.map(route => route.duration));
-        const selected = routes.reduce((best, route, i) => {
+        const defaultAlternative = routes.reduce((best, route, i) => {
           const warning = Number(!!route.restrictions.length) - Number(!!routes[best].restrictions.length);
           return warning < 0 || (warning === 0 && route.duration < routes[best].duration) ? i : best;
         }, 0);
+        const selected = Number.isInteger(preferredAlternative) && routes[preferredAlternative]
+          ? preferredAlternative : defaultAlternative;
         const select = $('alternative');
         select.replaceChildren();
         routes.forEach((route, i) => {
@@ -622,7 +793,8 @@
           const label = (route.mainRoads || 'Route ' + (i + 1)) + ' · ' + duration(route.duration) +
             (delta ? ' (+' + duration(route.duration - fastest) + ')' : routes.length > 1 ? ' (fastest)' : '') +
             ' · ' + (count ? count + ' flagged' : 'none found in data') +
-            (route.restrictions.length ? ' · Truck restrictions' : '');
+            (route.restrictions.length ? ' · Truck restrictions' : '') +
+            (route.coverage.countries.length ? ' · Outside US inventory' : '');
           select.add(new Option(label, i));
         });
         select.value = selected;
@@ -630,7 +802,7 @@
         $('catalog-toggle').checked = false;
         updateCatalog();
         showRoute(selected);
-        if (routes[selected].duration > fastest && !routes[selected].restrictions.length) {
+        if (selected === defaultAlternative && routes[selected].duration > fastest && !routes[selected].restrictions.length) {
           $('selected-route-note').textContent = 'The fastest car route has a known restriction warning. ' +
             'This route is +' + duration(routes[selected].duration - fastest) + ' and is not verified for trucks.';
         }
@@ -639,12 +811,13 @@
         $('resolved-details').open = false;
         $('resolved-locations').textContent = (start.fullLabel || start.label) + ' → ' + (end.fullLabel || end.label);
         screened = true;
-        recent.unshift(request);
+        recent.unshift(plannerState());
         if (recent.length > 5) recent.pop();
         $('recent-routes').replaceChildren(new Option('Choose a recent screen', ''),
           ...recent.map((entry, i) => new Option(entry.start + ' → ' + entry.end, i)));
         $('recent-routes').disabled = false;
         $('route-results').hidden = false;
+        saveShare(selected);
         if (matchMedia('(max-width: 849px)').matches) {
           $('controls').open = false;
           $('results').scrollIntoView({ block: 'start' });
@@ -660,10 +833,11 @@
         $('input-error').focus({ preventScroll: true });
         $('input-error').scrollIntoView({ block: 'nearest' });
       } finally {
-        $('submit').disabled = false;
-        $('example').disabled = false;
+        if (attempt === activeRequest) setBusy(false);
       }
     });
+    window.addEventListener('popstate', restoreNavigation);
+    restoreNavigation();
   }
 </script>
 </html>

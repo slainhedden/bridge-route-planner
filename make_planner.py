@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 import argparse
 import json
+from html import unescape
 from pathlib import Path
 
 
 HERE = Path(__file__).resolve().parent
+
+
+def source_text(text, state):
+    text = text or ""
+    if state == "PR":
+        text = text.replace("CA&#165;AS RIVER", "CAÑAS RIVER").replace("MARTIN PE&#165;A CHANNEL", "MARTIN PEÑA CHANNEL")
+    return unescape(text)
 
 
 def main():
@@ -21,16 +29,20 @@ def main():
         deck_measurements = [p[key] for key in ("inventory_route_meters", "over_roadway_meters")
                              if on_route and p[key] is not None]
         under = p["underclearance_meters"] if p["underclearance_reference"] == "H" else None
+        state = p["state"]
         points.append([
             round(lat, 5), round(lon, 5), p["truck_relevant_min_meters"], p["structure_number"],
-            p["facility_carried"], p["features_intersected"], p["state"], p["truck_relevant_min_item"],
+            source_text(p["facility_carried"], state), source_text(p["features_intersected"], state),
+            state, p["truck_relevant_min_item"],
             under, min(deck_measurements, default=None), p["route_prefix"], p["route_number"],
-            p["location"],
+            source_text(p["location"], state),
         ])
     packed = json.dumps(points, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     template = (HERE / "route_planner.template.html").read_text(encoding="utf-8")
     matching = (HERE / "route_matching.js").read_text(encoding="utf-8")
+    boundaries = (HERE / "route_boundaries.json").read_text(encoding="utf-8").strip()
     args.out.write_text(template.replace("__ROUTE_MATCHING__", matching)
+                        .replace("__ROUTE_BOUNDARIES__", boundaries)
                         .replace("__BRIDGE_DATA__", packed.replace("<", "\\u003c")),
                         encoding="utf-8")
     print(f"{args.out}: {len(points):,} bridge records, {args.out.stat().st_size:,} bytes")

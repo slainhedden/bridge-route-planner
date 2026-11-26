@@ -91,6 +91,55 @@ const routeMatching = (() => {
     return minutes < 60 ? minutes + ' min' : Math.floor(minutes / 60) + ' hr ' + minutes % 60 + ' min';
   }
 
+  function makeCoverageCheck(countries) {
+    function bbox(ring) {
+      return ring.reduce(([left, bottom, right, top], [x, y]) =>
+        [Math.min(left, x), Math.min(bottom, y), Math.max(right, x), Math.max(top, y)],
+      [Infinity, Infinity, -Infinity, -Infinity]);
+    }
+
+    function inRing(x, y, ring) {
+      let inside = false;
+      for (let i = 1; i < ring.length; i++) {
+        const [ax, ay] = ring[i - 1], [bx, by] = ring[i];
+        if ((ay > y) !== (by > y) && x < ax + (bx - ax) * (y - ay) / (by - ay)) inside = !inside;
+      }
+      return inside;
+    }
+
+    const prepared = Object.entries(countries).map(([country, polygons]) =>
+      [country, bbox(polygons.flatMap(rings => rings[0])),
+        polygons.map(([outer, ...holes]) => [bbox(outer), outer, holes])]);
+    const contains = ([left, bottom, right, top], x, y) => x >= left && x <= right && y >= bottom && y <= top;
+    return points => {
+      const found = new Set(), outside = [];
+      let current = null;
+      for (let i = 1; i < points.length; i++) {
+        const [ax, ay] = points[i - 1], [bx, by] = points[i];
+        const dx = bx - ax, dy = by - ay;
+        if (Math.abs(dx) > 180) continue;
+        const steps = Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) / .005);
+        for (let sample = 0; sample < steps; sample++) {
+          const t = (sample + .5) / steps, x = ax + t * dx, y = ay + t * dy;
+          const match = prepared.find(([, bounds, polygons]) => contains(bounds, x, y) &&
+            polygons.some(([box, outer, holes]) => contains(box, x, y) &&
+              inRing(x, y, outer) && !holes.some(hole => inRing(x, y, hole))));
+          if (match) {
+            found.add(match[0]);
+            if (!current) {
+              current = [[ax + sample * dx / steps, ay + sample * dy / steps]];
+              outside.push(current);
+            }
+            current.push([ax + (sample + 1) * dx / steps, ay + (sample + 1) * dy / steps]);
+          } else {
+            current = null;
+          }
+        }
+      }
+      return { countries: [...found], outside };
+    };
+  }
+
   const sources = {
     boston: 'https://www.mass.gov/news/dcr-launches-annual-storrowing-public-awareness-campaign-ahead-of-move-in-day-in-greater-boston',
     nyc: 'https://www.nyc.gov/html/dot/html/motorist/parkway-restrictions.shtml',
@@ -155,7 +204,7 @@ const routeMatching = (() => {
     return { restrictions: [...restrictions.values()], crossings: [...crossings.values()] };
   }
 
-  return { classify, duration, roadParts, routeAdvisories, foot, inch, cutoff };
+  return { classify, duration, makeCoverageCheck, roadParts, routeAdvisories, foot, inch, cutoff };
 })();
 
 if (typeof module === 'object') module.exports = routeMatching;
