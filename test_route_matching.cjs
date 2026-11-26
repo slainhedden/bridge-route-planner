@@ -1,6 +1,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { classify, routeAdvisories, duration } = require('./route_matching.js');
+const { classify, routeAdvisories, duration, makeCoverageCheck } = require('./route_matching.js');
+const routeBoundaries = require('./route_boundaries.json');
 
 const settings = { height: (13 * 12 + 9) * .0254 };
 const hit = (road, cardinal = 'S', distance = 0) => ({ road, cardinal, distance });
@@ -19,6 +20,11 @@ describe('road and level matching', () => {
     assert.equal(classify(stassney, [hit('I 35', 'N')], settings)[0].status, 'suspect');
   });
 
+  it('lists the 0.12 m I-16 source reading as suspect, not as a conflict', () => {
+    const i16 = bridge('SR 86', 'I-16 (SR 404)', 'GA', .12, null);
+    assert.equal(classify(i16, [hit('I-16')], settings)[0].status, 'suspect');
+  });
+
   it('selects separate Storrow eastbound under and westbound deck measurements', () => {
     const storrow = bridge('STORRW DR WB', 'STORROW DR EB', 'MA', 3.05, 3.35);
     for (const [cardinal, side, meters] of [['E', 'under', 3.05], ['W', 'on', 3.35]]) {
@@ -32,6 +38,22 @@ describe('road and level matching', () => {
     assert.deepEqual(classify(wacker, [hit('Upper Wacker Drive')], settings), []);
     assert.equal(classify(wacker, [hit('Wacker Drive')], settings)[0].status, 'check');
     assert.equal(classify(wacker, [hit('Lower Wacker Drive')], settings)[0].status, 'conflict');
+  });
+});
+
+describe('international coverage', () => {
+  const coverage = makeCoverageCheck(routeBoundaries);
+
+  it('finds Canada even when neither endpoint is in Canada', () => {
+    const route = [[-122.67, 48.99], [-122.67, 49.01], [-122.65, 49.01], [-122.65, 48.99]];
+    const result = coverage(route);
+    assert.deepEqual(result.countries, ['Canada']);
+    assert.equal(result.outside.length, 1);
+  });
+
+  it('distinguishes San Diego from a route into Mexico', () => {
+    assert.deepEqual(coverage([[-117.16, 32.72], [-117.04, 32.56]]).countries, []);
+    assert.deepEqual(coverage([[-117.04, 32.56], [-117.03, 32.53]]).countries, ['Mexico']);
   });
 });
 
